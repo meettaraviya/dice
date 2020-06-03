@@ -4,6 +4,10 @@ open Wmc
 open BddUtil
 open VarState
 
+(* hashtbl: https://ocaml.org/learn/tutorials/hashtbl.html *)
+
+(* hashtbl requires a custom hash function, where is it??? *)
+
 type expr =
   | And of expr * expr
   | Or of expr * expr
@@ -58,6 +62,12 @@ let within_epsilon x y =
   (* Float.abs  < 0.000001 *)
 
 let flip_id = ref 1
+(* let rec to_cube assigned =
+  Hashtbl.Poly.fold ~f:(fun k v z ->
+    Bdd.dand 
+  )
+  assigned Bdd.dtrue *)
+
 
 let rec from_external_expr (e: ExternalGrammar.eexpr) : expr =
   match e with
@@ -107,7 +117,9 @@ let rec from_external_expr (e: ExternalGrammar.eexpr) : expr =
 let rec from_external_func (f: ExternalGrammar.func) : func =
   {name = f.name; args = f.args; body = from_external_expr f.body}
 
-let rec from_external_prog (p: ExternalGrammar.program) : program =
+(* let rec not required !!! *)
+let from_external_prog (p: ExternalGrammar.program) : program =
+  (* currently only sampling in main() *)
   {functions = List.map p.functions ~f:from_external_func; body = from_external_expr p.body}
 
 
@@ -127,6 +139,11 @@ type compile_context = {
   name_map: (int, String.t) Hashtbl.Poly.t; (* map from variable identifiers to names, for debugging *)
   weights: weight; (* map from variables to weights *)
   funcs: (String.t, compiled_func) Hashtbl.Poly.t;
+  sampled_vars: (String.t, bool option) Hashtbl.Poly.t;
+  name_lookup: (String.t, int) Hashtbl.Poly.t;
+  q: float ref;
+  (* assigned: (int, Bdd.dt) Hashtbl.Poly.t;
+  frequency: (int, int) Hashtbl.Poly.t; *)
 }
 
 type compiled_program = {
@@ -136,16 +153,28 @@ type compiled_program = {
 
 type env = (String.t, varstate btree) Map.Poly.t (* map from variable identifiers to BDDs*)
 
-let new_context () =
+let new_context sampled_vars =
   let man = Man.make_d () in
   Man.disable_autodyn man;
   let weights = Hashtbl.Poly.create () in
   let names = Hashtbl.Poly.create () in
-  {man = man;
+  let names2 = Hashtbl.Poly.create () in
+  let ctx = {man = man;
    name_map = names;
    weights = weights;
-   funcs = Hashtbl.Poly.create ()}
+   funcs = Hashtbl.Poly.create ();
+   q = ref 1.0;
+   (* sampled_vars = Set.Poly.of_list sampled_vars; *)
+   sampled_vars = Hashtbl.Poly.create ();
+   name_lookup = names2
+   (* ;
+   assigned = Hashtbl.Poly.create ();
+   frequency = Hashtbl.Poly.create () *)
+   } in
+   let _ = List.iter sampled_vars ~f:(fun x -> Hashtbl.Poly.set ctx.sampled_vars x None) in
+   ctx
 
+(* action takes pace here !!! *)
 let rec compile_expr (ctx: compile_context) (env: env) e : compiled_expr =
   (** helper function for implementing binary operations
       [op] : size -> a -> b -> pos, defines the binary operation being implemented *)
@@ -164,7 +193,7 @@ let rec compile_expr (ctx: compile_context) (env: env) e : compiled_expr =
             Array.set init_l cur_pos (Bdd.dor cur_arrv (Bdd.dand inner_itm outer_itm));
           ));
     {state=Leaf(IntLeaf(Array.to_list init_l)); z=Bdd.dand c1.z c2.z; flips=List.append c1.flips c2.flips} in
-  match e with
+  let big_expr = match e with
   | And(e1, e2) ->
     let c1 = compile_expr ctx env e1 in
     let c2 = compile_expr ctx env e2 in
@@ -241,9 +270,30 @@ let rec compile_expr (ctx: compile_context) (env: env) e : compiled_expr =
     let var_lbl = Bdd.topvar new_f in
     let var_name = (Format.sprintf "f%d" !flip_id) in
     flip_id := !flip_id + 1;
+    (* Format.printf "Flip name: %s\n" var_name; *)
     Hashtbl.Poly.add_exn ctx.weights var_lbl (1.0-.f, f);
     Hashtbl.add_exn ctx.name_map var_lbl var_name;
-    {state=Leaf(BddLeaf(new_f)); z=Bdd.dtrue ctx.man; flips=[new_f]}
+    Hashtbl.add_exn ctx.name_lookup var_name var_lbl;
+    (* %%% We use add_exn because we know we are not adding a duplicate *)
+    (* (match Some (Some true)  with *)
+    (* if var_name=="f1" then  *)
+    (match Hashtbl.Poly.find ctx.sampled_vars var_name  with
+          Some y_opt ->
+            (* substitute *)
+            ( match y_opt with
+            Some y -> {state=Leaf(BddLeaf((if y then Bdd.dtrue else Bdd.dfalse) ctx.man)); z=Bdd.dtrue ctx.man; flips=[]}
+            (* sample *)
+            | None -> let rf = (Random.float 1.0) in
+              Format.printf "Sampling %s: p = %f\n" var_name f;
+              Format.printf "New value: %s\n" (if rf <= f then "True" else "False");
+              (* Format.printf "%f\n" rf; *)
+              ctx.q := !(ctx.q) *. (if rf <= f then f else 1.0 -. f);
+              Format.printf "Current q: %f\n" !(ctx.q);
+              {state=Leaf(BddLeaf((if rf <= f then Bdd.dtrue else Bdd.dfalse) ctx.man)); z=Bdd.dtrue ctx.man; flips=[]}
+            )
+        (* ignore *)
+        | None -> {state=Leaf(BddLeaf(new_f)); z=Bdd.dtrue ctx.man; flips=[new_f]}
+      )
 
   | Observe(g) ->
     let c = compile_expr ctx env g in
@@ -253,7 +303,17 @@ let rec compile_expr (ctx: compile_context) (env: env) e : compiled_expr =
     let c1 = compile_expr ctx env e1 in
     let env' = Map.Poly.set env ~key:x ~data:c1.state in
     let c2 = compile_expr ctx env' e2 in
-    {state=c2.state; z=Bdd.dand c1.z c2.z; flips=List.append c1.flips c2.flips}
+    let c3 = {state=c2.state; z=Bdd.dand c1.z c2.z; flips=List.append c1.flips c2.flips} in
+    c3
+    (* let x_option =  in *)
+(*     (match Hashtbl.Poly.find ctx.sampled_vars x with
+        (* substitute *)
+          Some Some y -> c3
+        (* sample *)
+        | Some None -> c3
+        (* ignore *)
+        | None -> c3) *)
+    
 
   | Discrete(l) ->
     (* first construct a list of all the properly parameterized flips *)
@@ -271,8 +331,10 @@ let rec compile_expr (ctx: compile_context) (env: env) e : compiled_expr =
            flips := List.append !flips [new_f];
            let var_lbl = Bdd.topvar new_f in
            let new_z = cur_z -. param in
+          (* %%% We use add_exn because we know we are not adding a duplicate *)
            Hashtbl.Poly.add_exn ctx.weights var_lbl (1.0-.new_param, new_param);
            Hashtbl.add_exn ctx.name_map var_lbl (Format.sprintf "i%f" param);
+           Hashtbl.add_exn ctx.name_lookup (Format.sprintf "i%f" param) var_lbl;
            (List.append cur_l [new_f], new_z))
       ) in
     (* convert the flip list into logical formulae *)
@@ -327,6 +389,7 @@ let rec compile_expr (ctx: compile_context) (env: env) e : compiled_expr =
         let newv = Bdd.newvar ctx.man in
         let lvl = Bdd.topvar newv in
         (match Hashtbl.Poly.find ctx.weights (Bdd.topvar f) with
+    (* %%% We use add_exn because we know we are not adding a duplicate *)
          | Some(v) -> Hashtbl.Poly.add_exn ctx.weights lvl v
          | None -> ());
         newv) in
@@ -350,7 +413,18 @@ let rec compile_expr (ctx: compile_context) (env: env) e : compiled_expr =
         Bdd.existand argcube argiff bdd) in
     let final_z = List.fold ~init:(Bdd.existand argcube argiff refreshed_z) cargs
         ~f:(fun acc arg -> Bdd.dand arg.z acc ) in
-    {state=final_state; z=final_z; flips=new_flips}
+    {state=final_state; z=final_z; flips=new_flips} in
+
+    big_expr
+    (* let z_substituted = Hashtbl.Poly.fold ctx.assigned ~init:big_expr.z ~f:(fun ~key:k ~data:v z -> Bdd.compose k v z) in *)
+    (* let big_expr_substituted = {state=big_expr.state; z=z_substituted; flips=big_expr.flips} in *)
+    (* if Bdd.size big_expr.z <= 10000 then big_expr_substituted else  *)
+    (* let most_common_var = Hashtbl.Poly.fold ctx.frequency -1 ~f(fun k v k_best -> 0) in *)
+    (* let rfloat = Random.float 1.0 in *)
+    (* let new_val = rfloat < big_expr_substituted.ctx.weights.(most_common_var) in *)
+    (* let new_ctx =  *)
+    (* big_expr_substituted *)
+    (* let sampled_variable =  *)
 
 
 (** generates a symbolic representation for a variable of the given type *)
@@ -380,6 +454,7 @@ let compile_func ctx (f: func) : compiled_func =
                         let bdd = if idx = i then cur else Bdd.dnot cur in
                         Bdd.dand bdd acc
                       )))) in
+    (* %%% We use add_exn because we know we are not adding a duplicate *)
           let map' = try Map.Poly.add_exn map ~key:name ~data:env_arg
             with _ -> failwith (Format.sprintf "Argument names must be unique: %s found twice" name) in
           (List.append lst [placeholder_arg], map')
@@ -388,13 +463,16 @@ let compile_func ctx (f: func) : compiled_func =
   let body = compile_expr ctx env f.body in
   {args = args; body = body}
 
-let compile_program (p:program) : compiled_program =
+let compile_program ?(sampled_vars=[]) (p:program) : compiled_program =
   (* Format.printf "Compiling program\n";
    * flush_all (); *)
   (* first compile the functions in topological order *)
-  let ctx = new_context () in
+  flip_id := 0;
+  Format.printf "\n";
+  let ctx = new_context sampled_vars in
   List.iter p.functions ~f:(fun func ->
       let c = compile_func ctx func in
+    (* %%% We use add_exn because we know we are not adding a duplicate *)
       try Hashtbl.Poly.add_exn ctx.funcs ~key:func.name ~data:c
       with _ -> failwith (Format.sprintf "Function names must be unique: %s found twice" func.name)
     );

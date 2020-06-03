@@ -1,0 +1,34 @@
+
+fun sum1(a: bool) { if a then int(4, 1) else int(4, 0) }
+fun sum2(a: bool, b: bool) { sum1(a) + sum1(b) }
+fun sum3(a: bool, b: bool, c: bool) { sum1(a) + sum2(b, c) }
+fun sum4(a: bool, b: bool, c: bool, d: bool) { sum2(a, b) + sum2(c, d) }
+fun sum5(a: bool, b: bool, c: bool, d: bool, e: bool) { sum2(a, b) + sum3(c, d, e) }
+fun sum6(a: bool, b: bool, c: bool, d: bool, e: bool, f: bool) { sum3(a, b, c) + sum3(d, e, f) }
+fun sum7(a: bool, b: bool, c: bool, d: bool, e: bool, f: bool, g: bool) { sum3(a, b, c) + sum4(d, e, f, g) }
+fun sum8(a: bool, b: bool, c: bool, d: bool, e: bool, f: bool, g: bool, h: bool) { sum4(a, b, c, d) + sum4(e, f, g, h) }
+
+let x_0_0 = flip(0.5) in
+let cnt_0_0 = if x_0_0 then int(4, 1) else int(4, 0) in
+let _ = observe(cnt_0_0 != int(4, 3)) in
+let x_0_1 = flip(0.5) in
+let cnt_0_1 = if x_0_1 then cnt_0_0 + int(4, 1) else cnt_0_0 in
+let _ = observe(cnt_0_1 != int(4, 3)) in
+let x_0_2 = flip(0.5) in
+let cnt_0_2 = if x_0_2 then cnt_0_1 + int(4, 1) else cnt_0_1 in
+let _ = observe(cnt_0_2 != int(4, 3)) in
+let x_1_0 = flip(0.5) in
+let cnt_1_0 = if x_1_0 then cnt_0_2 + int(4, 1) else cnt_0_2 in
+let _ = observe(cnt_1_0 != int(4, 3)) in
+let x_1_1 = flip(0.5) in
+let cnt_1_1 = if x_1_1 then cnt_1_0 + int(4, 1) else cnt_1_0 in
+let _ = observe(cnt_1_1 != int(4, 3)) in
+let x_1_2 = flip(0.5) in
+let cnt_1_2 = if x_1_2 then cnt_1_1 + int(4, 1) else cnt_1_1 in
+let _ = observe(cnt_1_2 != int(4, 3)) in
+
+let _ = observe(sum3(x_0_1, x_1_0, x_1_1) == int(4, 1)) in
+let _ = observe(!x_0_0) in
+
+let _ = observe(cnt_1_2 == int(4, 2)) in
+(((((x_0_0, x_0_1), x_0_2), x_1_0), x_1_1), x_1_2)

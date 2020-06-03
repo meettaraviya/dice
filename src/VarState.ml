@@ -2,11 +2,14 @@ open Core
 open Cudd
 
 (** The result of compiling an expression. A pair (value, normalizing constant) *)
+
+(* Where are these types defined??? *)
 type varstate =
     BddLeaf of Bdd.dt
   | IntLeaf of Bdd.dt List.t
 
 (** A compiled variable. It is a tree to compile tuples. *)
+(* What does this mean??? *)
 type 'a btree =
     Leaf of 'a
   | Node of 'a btree * 'a btree
